@@ -3324,6 +3324,7 @@ async function ensureTab(spreadsheetId, tabName){
     headers:{Authorization:'Bearer '+accessToken}
   });
   const meta = await r.json();
+  if(meta.error) throw new Error(meta.error.message||'Could not access spreadsheet');
   const existing = (meta.sheets||[]).find(s=>s.properties.title===tabName);
   if(existing) return existing.properties.sheetId;
 
@@ -3334,6 +3335,8 @@ async function ensureTab(spreadsheetId, tabName){
     body: JSON.stringify({requests:[{addSheet:{properties:{title:tabName}}}]})
   });
   const crData = await cr.json();
+  if(crData.error) throw new Error(crData.error.message||'Could not create tab');
+  if(!crData.replies || !crData.replies[0]) throw new Error('Unexpected response creating tab');
   const newSheetId = crData.replies[0].addSheet.properties.sheetId;
 
   // Write header row to new tab
