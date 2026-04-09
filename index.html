@@ -3325,7 +3325,8 @@ async function ensureTab(spreadsheetId, tabName){
   });
   const meta = await r.json();
   if(meta.error) throw new Error(meta.error.message||'Could not access spreadsheet');
-  const existing = (meta.sheets||[]).find(s=>s.properties.title===tabName);
+  // Case-insensitive match — handles CONFIG vs Config etc.
+  const existing = (meta.sheets||[]).find(s=>s.properties.title.toLowerCase()===tabName.toLowerCase());
   if(existing) return existing.properties.sheetId;
 
   // Create the tab
@@ -3335,7 +3336,18 @@ async function ensureTab(spreadsheetId, tabName){
     body: JSON.stringify({requests:[{addSheet:{properties:{title:tabName}}}]})
   });
   const crData = await cr.json();
-  if(crData.error) throw new Error(crData.error.message||'Could not create tab');
+  if(crData.error){
+    // "already exists" means a race condition or case mismatch — re-fetch and return the existing id
+    if(crData.error.message&&crData.error.message.includes('already exists')){
+      const r2 = await fetch(`https://sheets.googleapis.com/v4/spreadsheets/${spreadsheetId}?fields=sheets.properties`,{
+        headers:{Authorization:'Bearer '+accessToken}
+      });
+      const meta2 = await r2.json();
+      const found = (meta2.sheets||[]).find(s=>s.properties.title.toLowerCase()===tabName.toLowerCase());
+      if(found) return found.properties.sheetId;
+    }
+    throw new Error(crData.error.message||'Could not create tab');
+  }
   if(!crData.replies || !crData.replies[0]) throw new Error('Unexpected response creating tab');
   const newSheetId = crData.replies[0].addSheet.properties.sheetId;
 
@@ -3637,7 +3649,7 @@ async function fetchAssessmentNames(){
       headers:{Authorization:'Bearer '+accessToken}
     });
     const data = await r.json();
-    const SYSTEM_TABS = new Set(['USERS','Config','_TEMPLATES','Sheet1','Sheet2','Sheet3']);
+    const SYSTEM_TABS = new Set(['USERS','Config','CONFIG','_TEMPLATES','Sheet1','Sheet2','Sheet3']);
     knownAssessmentNames = (data.sheets||[])
       .map(s=>s.properties.title)
       .filter(t=> !SYSTEM_TABS.has(t) && !t.startsWith('_'));
@@ -3682,7 +3694,7 @@ async function loadFromDriveDialog(){
     });
     const data=await r.json();
     // Filter out internal system tabs — only show actual assessment tabs to teachers
-    const SYSTEM_TABS = new Set(['USERS','Config','_TEMPLATES','Sheet1','Sheet2','Sheet3']);
+    const SYSTEM_TABS = new Set(['USERS','Config','CONFIG','_TEMPLATES','Sheet1','Sheet2','Sheet3']);
     const tabs=(data.sheets||[])
       .map(s=>s.properties.title)
       .filter(t=> !SYSTEM_TABS.has(t) && !t.startsWith('_'));
