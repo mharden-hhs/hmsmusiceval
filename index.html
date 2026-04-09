@@ -520,8 +520,12 @@ body{background:var(--light);font-family:'Lato',sans-serif;margin:0;padding:0;}
     <button class="btn btn-sm" style="background:rgba(255,255,255,.1);color:white;border:1px solid rgba(255,255,255,.2);" onclick="closeAdmin()"><i class="fas fa-xmark"></i></button>
   </div>
   <div class="admin-tabs">
-    <div class="admin-tab active admin-only-tab" onclick="switchTab('drive')"><i class="fab fa-google-drive" style="margin-right:5px;"></i>Drive Settings</div>
-    <div class="admin-tab admin-only-tab" onclick="switchTab('settings')"><i class="fas fa-gear" style="margin-right:5px;"></i>Settings</div>
+    <div class="admin-tab active teacher-tab" onclick="switchTab('sections')"><i class="fas fa-list-check" style="margin-right:5px;"></i>Sections &amp; Items</div>
+    <div class="admin-tab teacher-tab" onclick="switchTab('classes')"><i class="fas fa-users" style="margin-right:5px;"></i>Classes &amp; Fields</div>
+    <div class="admin-tab teacher-tab" onclick="switchTab('scales')"><i class="fas fa-sliders" style="margin-right:5px;"></i>Scales</div>
+    <div class="admin-tab teacher-tab" onclick="switchTab('templates')"><i class="fas fa-layer-group" style="margin-right:5px;"></i>Templates</div>
+    <div class="admin-tab admin-only-tab" onclick="switchTab('drive')" style="display:none;"><i class="fab fa-google-drive" style="margin-right:5px;"></i>Drive Settings</div>
+    <div class="admin-tab admin-only-tab" onclick="switchTab('settings')" style="display:none;"><i class="fas fa-gear" style="margin-right:5px;"></i>Settings</div>
     <div class="admin-tab admin-only-tab" id="setupTab" onclick="switchTab('setup')" style="display:none;">
       <i class="fas fa-wand-magic-sparkles" style="margin-right:5px;color:#7b1fa2;"></i>New School Setup
     </div>
@@ -2416,13 +2420,15 @@ function _openAdminModal(isAdmin){
   if(iconEl)  iconEl.className   = isAdmin ? 'fas fa-shield-halved' : 'fas fa-sliders';
 
   if(isAdmin){
-    // Admin modal: only admin-exclusive tabs
+    // Admin: hide teacher tabs, show admin-only tabs, open on Drive Settings
+    document.querySelectorAll('.teacher-tab').forEach(t=>t.style.display='none');
     document.querySelectorAll('.admin-only-tab').forEach(t=>t.style.display='');
     switchTab('drive');
     populateDriveSettings();
     populateBranding();
   } else {
-    // Settings modal: only teacher tabs
+    // Settings: show teacher tabs, hide admin-only tabs, open on Sections
+    document.querySelectorAll('.teacher-tab').forEach(t=>t.style.display='');
     document.querySelectorAll('.admin-only-tab').forEach(t=>t.style.display='none');
     switchTab('sections');
     populateAdminSections();
