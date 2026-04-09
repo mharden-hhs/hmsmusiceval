@@ -1129,7 +1129,7 @@ let accessToken = null;
 /* ═══ CONFIG PERSISTENCE ═══════════════════════════════════════ */
 function loadConfig(){
   try{
-    const raw = localStorage.getItem('guitar_config');
+    const raw = ls.get('config');
     if(raw) config = JSON.parse(raw);
     migrateConfig();
   }catch(e){}
@@ -1215,7 +1215,7 @@ function scaleColors(count){
   return colors;
 }
 function saveConfig(){
-  localStorage.setItem('guitar_config', JSON.stringify(config));
+  ls.set('config', JSON.stringify(config));
 }
 function applyBranding(){
   const b = config.branding || DEFAULT_CONFIG.branding;
@@ -1756,7 +1756,7 @@ window.addEventListener('beforeunload', e => {
   // Use sendBeacon for a best-effort fire-and-forget on close
   // Sheets API requires JSON so we fall back to a flag in localStorage
   // so the next page load re-syncs immediately
-  localStorage.setItem('guitar_sync_on_load','1');
+  ls.set('sync_on_load','1');
 });
 
 /* ═══ LOCAL STORAGE ════════════════════════════════════════════ */
@@ -1804,14 +1804,14 @@ function autoSave(){
       saved: Date.now(),
       template: captureTemplateSnapshot(),
     };
-    localStorage.setItem('guitar_current',JSON.stringify(data));
+    ls.set('current',JSON.stringify(data));
   }catch(e){}
   markDirty();
   if(accessToken && currentSheetId) scheduleSyncNow();
 }
 function saveToHistory(){
   try{
-    const id='guitar_hist_'+Date.now();
+    const id=SCHOOL_KEY+'_hist_'+Date.now();
     const data={
       ...getFormMeta(),
       state: JSON.parse(JSON.stringify(state)),
@@ -1820,15 +1820,15 @@ function saveToHistory(){
       template: captureTemplateSnapshot(),
     };
     localStorage.setItem(id,JSON.stringify(data));
-    const keys=JSON.parse(localStorage.getItem('guitar_hist_keys')||'[]');
+    const keys=JSON.parse(ls.get('hist_keys')||'[]');
     keys.unshift(id);
     if(keys.length>20){localStorage.removeItem(keys.pop());}
-    localStorage.setItem('guitar_hist_keys',JSON.stringify(keys));
+    ls.set('hist_keys',JSON.stringify(keys));
   }catch(e){}
 }
 function restoreFromStorage(){
   try{
-    const raw=localStorage.getItem('guitar_current');
+    const raw=ls.get('current');
     if(!raw) return;
     const data=JSON.parse(raw);
     // config (sections/branding) already loaded via loadConfig() at startup
@@ -1875,7 +1875,7 @@ function newAssessment(){
 
 /* ═══ HISTORY MODAL ════════════════════════════════════════════ */
 function openHistory(){
-  const keys=JSON.parse(localStorage.getItem('guitar_hist_keys')||'[]');
+  const keys=JSON.parse(ls.get('hist_keys')||'[]');
   const list=document.getElementById('histList');
   if(!keys.length){list.innerHTML='<em style="color:#aaa;font-size:13px;">No saved assessments yet.</em>';}
   else{
@@ -2008,7 +2008,7 @@ function _applyHistoryEntry(d){
   updateSummary();
 
   // 7. Write to guitar_current LAST — prevents autoSave overwriting during steps above
-  localStorage.setItem('guitar_current', JSON.stringify({ ...d, saved: Date.now() }));
+  ls.set('current', JSON.stringify({ ...d, saved: Date.now() }));
 
   closeHistory();
   const tplName = d.template?.assessmentName ? ` (${d.template.assessmentName})` : '';
@@ -2016,8 +2016,8 @@ function _applyHistoryEntry(d){
 }
 function deleteHistory(key,btn){
   localStorage.removeItem(key);
-  const keys=JSON.parse(localStorage.getItem('guitar_hist_keys')||'[]');
-  localStorage.setItem('guitar_hist_keys',JSON.stringify(keys.filter(k=>k!==key)));
+  const keys=JSON.parse(ls.get('hist_keys')||'[]');
+  ls.set('hist_keys',JSON.stringify(keys.filter(k=>k!==key)));
   btn.closest('.hist-row').remove();
 }
 function clearAllHistory(){
@@ -2026,9 +2026,9 @@ function clearAllHistory(){
     body:'This will permanently delete all saved assessments from this browser. This cannot be undone.',
     okLabel:'Clear all', okClass:'btn-danger', icon:'fas fa-trash',
     onOk(){
-      const keys=JSON.parse(localStorage.getItem('guitar_hist_keys')||'[]');
+      const keys=JSON.parse(ls.get('hist_keys')||'[]');
       keys.forEach(k=>localStorage.removeItem(k));
-      localStorage.removeItem('guitar_hist_keys');
+      ls.remove('hist_keys');
       document.getElementById('histList').innerHTML='<em style="color:#aaa;font-size:13px;">No saved assessments yet.</em>';
       toast('History cleared','fas fa-trash','#e74c3c');
     }
@@ -2911,7 +2911,7 @@ function saveAndApplyClasses(){
 
 /* ── DRIVE SETTINGS ────────────────────────────────────────── */
 function populateDriveSettings(){
-  document.getElementById('adminTrackId').value=config.driveSettings.trackingSheetId||localStorage.getItem('guitar_tracking_sheet_id')||'';
+  document.getElementById('adminTrackId').value=config.driveSettings.trackingSheetId||ls.get('tracking_sheet_id')||'';
   document.getElementById('adminFolderId').value=config.driveSettings.defaultFolderId||'';
   document.getElementById('adminConfigSheetId').value=config.driveSettings.configSheetId||'';
   document.getElementById('adminAssessmentName').value=config.driveSettings.defaultAssessmentName||'';
@@ -2925,7 +2925,7 @@ function saveDriveSettings(){
   config.driveSettings.defaultAssessmentName=document.getElementById('adminAssessmentName').value.trim();
   const sel=document.getElementById('adminSyncInterval');
   if(sel){ config.driveSettings.syncInterval=parseInt(sel.value)||60; syncIntervalSeconds=config.driveSettings.syncInterval; }
-  if(config.driveSettings.trackingSheetId) localStorage.setItem('guitar_tracking_sheet_id',config.driveSettings.trackingSheetId);
+  if(config.driveSettings.trackingSheetId) ls.set('tracking_sheet_id',config.driveSettings.trackingSheetId);
   saveConfig();
   // Apply default assessment name to the bar field if it's currently empty
   const anEl=document.getElementById('assessmentName');
@@ -3102,7 +3102,7 @@ function initTokenClient(retryCount){
     tokenClient=google.accounts.oauth2.initTokenClient({
       client_id:cid, scope:SCOPES, callback:handleToken,
     });
-    const lastEmail = localStorage.getItem('guitar_last_signed_in_email');
+    const lastEmail = ls.get('last_signed_in_email');
     if(lastEmail) silentSignIn(lastEmail);
     else showSignInBanner();
   }catch(e){ console.warn('GIS init',e); showSignInBanner(); }
@@ -3156,7 +3156,7 @@ async function fetchUserInfo(silent=false){
       }
       return;
     }
-    localStorage.setItem('guitar_last_signed_in_email', email);
+    ls.set('last_signed_in_email', email);
     setSignedIn(name||email, email);
     hideSignInBanner();
     if(!silent) closeDriveModal();
@@ -3174,8 +3174,8 @@ async function fetchUserInfo(silent=false){
       catch(e){ console.info('Config pull skipped:', e.message); }
     }
     startSyncTimer();
-    if(localStorage.getItem('guitar_sync_on_load')==='1'){
-      localStorage.removeItem('guitar_sync_on_load');
+    if(ls.get('sync_on_load')==='1'){
+      ls.remove('sync_on_load');
       syncPending=true; scheduleSyncNow();
     }
   }catch(e){ if(!silent) toast('Sign-in error: '+(e.message||e),'fas fa-triangle-exclamation','#e74c3c'); }
@@ -3238,7 +3238,7 @@ function signIn(){
 function signOut(){
   if(accessToken) google.accounts.oauth2.revoke(accessToken,()=>{});
   accessToken=null;
-  localStorage.removeItem('guitar_last_signed_in_email');
+  ls.remove('last_signed_in_email');
   stopSyncTimer();
   document.getElementById('driveNotSignedIn').style.display='block';
   document.getElementById('driveSignedIn').style.display='none';
@@ -3267,7 +3267,7 @@ function getAssessmentName(){
 
 function getSharedSheetId(){
   return (config.driveSettings.trackingSheetId||'').trim() ||
-         localStorage.getItem('guitar_tracking_sheet_id')||'';
+         ls.get('tracking_sheet_id')||'';
 }
 
 /* ── Build the flat row for the shared sheet ─────────────────── */
@@ -3880,7 +3880,14 @@ const USERS_SHEET_ID = '1T-c1smVOyfZpvViJq_FeLh1hJsvTnReLLzJT1UAW2dI';
 const CONFIG_SHEET_ID = '1T-c1smVOyfZpvViJq_FeLh1hJsvTnReLLzJT1UAW2dI';
 // District Drive folder — all school sheets created by the setup wizard land here
 const DISTRICT_FOLDER_ID = '18AEjSb3ePq5JbGnJbjPFx4Mstt2tgrNQ';
-const USERS_CACHE_KEY = 'guitar_student_db_cache';
+// School-specific localStorage namespace
+const SCHOOL_KEY = 'hms';
+const ls = {
+  get:    k => localStorage.getItem(SCHOOL_KEY+'_'+k),
+  set:    (k,v) => localStorage.setItem(SCHOOL_KEY+'_'+k, v),
+  remove: k => localStorage.removeItem(SCHOOL_KEY+'_'+k),
+};
+const USERS_CACHE_KEY = SCHOOL_KEY+'_student_db_cache';
 
 let STUDENT_DB = loadCachedStudents();
 
@@ -4257,7 +4264,7 @@ async function sendReportEmail(){
    Templates are snapshots of: sections, scores, assessment name,
    classes, teachers. Stored in localStorage + Google Sheet tab.
    ═══════════════════════════════════════════════════════════════ */
-const TPL_CACHE_KEY  = 'guitar_templates';
+const TPL_CACHE_KEY  = SCHOOL_KEY+'_templates';
 const TPL_SHEET_TAB  = '_TEMPLATES';
 
 function getTemplates(){
@@ -5115,7 +5122,7 @@ async function runSetupExport(){
   syncIntervalSeconds = config.driveSettings.syncInterval || 60;
 
   // On first install: seed Guitar template and start with blank canvas
-  const hasStoredConfig = !!localStorage.getItem('guitar_config');
+  const hasStoredConfig = !!ls.get('config');
   if(!hasStoredConfig){
     const builtInTemplate = {
       id: 'tpl_builtin_guitar',
