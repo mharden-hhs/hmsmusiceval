@@ -2205,12 +2205,34 @@ async function loadRosterData(){
 
 function getRosterCompletion(row){
   // Work out how many items are scored from the sheet row
-  // Columns: Name(0) Email(1) Class(2) Grade(3) Date(4) Teacher(5) [customFields] [items...] Avg Comments
+  // Use rosterHeader to calculate correct offsets rather than current form state,
+  // since the sheet may have been saved with a different template/custom field count.
+  if(!row) return { scored:0, total:0, avg:'' };
+
+  if(rosterHeader.length > 6){
+    // Find where scores start by skipping fixed cols + any custom field cols
+    // Custom fields sit between Teacher(5) and the first item column
+    // We detect them by checking which cols come before a known item header pattern
+    const all = getAllItems();
+    const customCount = (config.customFields||[]).length;
+    const itemStart = 6 + customCount;
+    // Use header length to derive total item count
+    // Header: Name Email Class Grade Date Teacher [customFields...] [items...] Avg Comments
+    // So item count = header.length - itemStart - 2 (Avg + Comments)
+    const headerItemCount = Math.max(0, rosterHeader.length - itemStart - 2);
+    const total = headerItemCount || all.length;
+    const itemEnd = itemStart + total;
+    const scores = row.slice(itemStart, itemEnd);
+    const scored = scores.filter(s=>s&&s.trim()!=='').length;
+    const avg = row[itemEnd] || '';
+    return { scored, total, avg };
+  }
+
+  // Fallback: use current form state
   const all = getAllItems();
   const customCount = (config.customFields||[]).length;
   const itemStart = 6 + customCount;
   const itemEnd   = itemStart + all.length;
-  if(!row) return { scored:0, total:all.length, avg:'' };
   const scores = row.slice(itemStart, itemEnd);
   const scored  = scores.filter(s=>s&&s.trim()!=='').length;
   const avg     = row[itemEnd] || '';
@@ -3722,7 +3744,9 @@ async function loadTabStudents(sharedId, tabName){
       headers:{Authorization:'Bearer '+accessToken}
     });
     const data=await r.json();
-    const rows=(data.values||[]).slice(1); // skip header
+    const allRows=(data.values||[]);
+    rosterHeader = allRows[0] || []; // capture header for template matching in loadStudentRow
+    const rows=allRows.slice(1);
     if(!rows.length){toast('No student data in this tab yet','fas fa-circle-info');return;}
     document.getElementById('histList').innerHTML=`
       <div style="font-size:12px;color:#888;margin-bottom:8px;">
@@ -3768,9 +3792,59 @@ function loadStudentRow(row, tabName){
   }
 
   // Score columns start after the 6 fixed cols + any custom fields
-  const customCount = (config.customFields||[]).length;
-  const itemStart   = 6 + customCount;
-  const all         = getAllItems();
+  // We use rosterHeader to determine the correct template and column layout
+  let customCount = (config.customFields||[]).length;
+  let itemStart   = 6 + customCount;
+  let all         = getAllItems();
+
+  // Step 1: Try to match template by assessment name (tabName) — simplest and most reliable
+  const tpls = getTemplates();
+  const normalize = s => s.replace(/\s+name\s*$/i,'').toLowerCase().trim();
+
+  let switchedTemplate = false;
+  const nameMatchTpl = tpls.find(tpl =>
+    tpl.assessmentName && tpl.assessmentName.toLowerCase().trim() === tabName.toLowerCase().trim()
+  );
+  if(nameMatchTpl && nameMatchTpl.sections.length > 0){
+    const currentItems = all.map(i=>i.label);
+    const tplItems = nameMatchTpl.sections.flatMap(s=>s.subsections.flatMap(ss=>ss.items)).map(i=>i.label);
+    // Only switch if the template is different from current
+    if(JSON.stringify(currentItems) !== JSON.stringify(tplItems)){
+      applyTemplate(nameMatchTpl, true);
+      customCount = (config.customFields||[]).length;
+      itemStart   = 6 + customCount;
+      all         = getAllItems();
+      initState();
+      switchedTemplate = true;
+    }
+  }
+
+  // Step 2: If name match didn't work, try header-based matching
+  if(!switchedTemplate && rosterHeader.length > itemStart){
+    const headerItems = rosterHeader.slice(itemStart);
+    const currentItems = all.map(i=>i.label);
+    const matches = headerItems.length >= all.length &&
+      all.every((item,i) => normalize(headerItems[i]||'') === normalize(item.label));
+
+    if(!matches){
+      const matchingTpl = tpls.find(tpl=>{
+        const tplItems = tpl.sections.flatMap(s=>s.subsections.flatMap(ss=>ss.items));
+        if(tplItems.length === 0) return false;
+        const tplCustomCount = (tpl.customFields||[]).length;
+        const tplItemStart = 6 + tplCustomCount;
+        const tplHeaderItems = rosterHeader.slice(tplItemStart);
+        return tplItems.length <= tplHeaderItems.length &&
+          tplItems.every((item,i) => normalize(tplHeaderItems[i]||'') === normalize(item.label));
+      });
+      if(matchingTpl){
+        applyTemplate(matchingTpl, true);
+        customCount = (config.customFields||[]).length;
+        itemStart   = 6 + customCount;
+        all         = getAllItems();
+        initState();
+      }
+    }
+  }
 
   all.forEach((item, i)=>{
     const raw = row[itemStart + i] || '';
@@ -3814,10 +3888,12 @@ function loadStudentRow(row, tabName){
     }
   }
 
-  // Restore custom field values
+  // Restore custom field values — must render the bar first so the inputs exist in DOM
+  // Use the recalculated customCount (after any template switch) for correct column offset
+  renderCustomFieldsBar();
   (config.customFields||[]).forEach((f, i)=>{
     const el = document.getElementById('cf_'+f.id);
-    if(el) el.value = row[6+i] || '';
+    if(el) el.value = row[6+i] || '';  // custom fields start at col 6
   });
 
   // Comments are the last column; Avg Score is second-to-last — skip it
