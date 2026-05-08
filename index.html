@@ -3435,37 +3435,89 @@ async function findStudentRow(spreadsheetId, tabName, email, cls){
 
 /* ── Core upsert: update existing row or append new one ──────── */
 async function upsertStudentRow(spreadsheetId, tabName){
-  const row    = buildSharedRow();
-  const header = buildSharedHeader();
-  const email  = row[1]; // col B
-  const cls    = row[2]; // col C — disambiguates multi-course students
+  const newHeader = buildSharedHeader();
+  const newRow    = buildSharedRow();
+  const email     = newRow[1];
+  const cls       = newRow[2];
 
-  // Always overwrite row 1 with the current header so it stays in sync with
-  // the active template — even if the tab was created with a different template
-  await fetch(`https://sheets.googleapis.com/v4/spreadsheets/${spreadsheetId}/values/${encodeURIComponent(tabName+'!A1')}?valueInputOption=USER_ENTERED`,{
-    method:'PUT',
-    headers:{Authorization:'Bearer '+accessToken,'Content-Type':'application/json'},
-    body: JSON.stringify({range:`${tabName}!A1`,majorDimension:'ROWS',values:[header]})
+  // Fetch existing header
+  let existingHeader = [];
+  try{
+    const hr = await fetch(
+      `https://sheets.googleapis.com/v4/spreadsheets/${spreadsheetId}/values/${encodeURIComponent(tabName+'!1:1')}`,
+      {headers:{Authorization:'Bearer '+accessToken}}
+    );
+    const hd = await hr.json();
+    existingHeader = (hd.values && hd.values[0]) || [];
+  }catch(e){}
+
+  // If no existing header, write fresh and append
+  if(!existingHeader.length){
+    await fetch(`https://sheets.googleapis.com/v4/spreadsheets/${spreadsheetId}/values/${encodeURIComponent(tabName+'!A1')}?valueInputOption=USER_ENTERED`,{
+      method:'PUT', headers:{Authorization:'Bearer '+accessToken,'Content-Type':'application/json'},
+      body: JSON.stringify({range:`${tabName}!A1`,majorDimension:'ROWS',values:[newHeader]})
+    });
+    await fetch(`https://sheets.googleapis.com/v4/spreadsheets/${spreadsheetId}/values/${encodeURIComponent(tabName+'!A1')}:append?valueInputOption=USER_ENTERED&insertDataOption=INSERT_ROWS`,{
+      method:'POST', headers:{Authorization:'Bearer '+accessToken,'Content-Type':'application/json'},
+      body: JSON.stringify({majorDimension:'ROWS',values:[newRow]})
+    });
+    return 'appended';
+  }
+
+  // Terminal columns that must always be last and never duplicated
+  const TERMINAL = ['avg score','overall comments'];
+
+  // Build merged header:
+  // 1. Strip terminals from existing, deduplicate
+  const seenCols = new Set();
+  const dedupedCore = existingHeader
+    .filter(h => !TERMINAL.includes((h||'').toLowerCase().trim()))
+    .filter(h => {
+      const k = (h||'').toLowerCase().trim();
+      if(!k || seenCols.has(k)) return false;
+      seenCols.add(k); return true;
+    });
+
+  // 2. Add any new columns from newHeader (excluding terminals)
+  newHeader
+    .filter(h => !TERMINAL.includes((h||'').toLowerCase().trim()))
+    .forEach(col => {
+      const k = (col||'').toLowerCase().trim();
+      if(k && !seenCols.has(k)){ seenCols.add(k); dedupedCore.push(col); }
+    });
+
+  // 3. Terminals always last, exactly once
+  const mergedHeader = [...dedupedCore, 'Avg Score', 'Overall Comments'];
+
+  // Map new row values into merged header by column name
+  const mergedRow = new Array(mergedHeader.length).fill('');
+  newHeader.forEach((col, newIdx) => {
+    const k = (col||'').toLowerCase().trim();
+    const mergedIdx = TERMINAL.includes(k)
+      ? mergedHeader.map(h=>(h||'').toLowerCase().trim()).lastIndexOf(k)
+      : mergedHeader.findIndex(h => (h||'').toLowerCase().trim() === k);
+    if(mergedIdx >= 0) mergedRow[mergedIdx] = newRow[newIdx] || '';
   });
 
-  const existingRow = await findStudentRow(spreadsheetId, tabName, email, cls);
+  // Write corrected header (also fixes duplicates already in sheet)
+  await fetch(`https://sheets.googleapis.com/v4/spreadsheets/${spreadsheetId}/values/${encodeURIComponent(tabName+'!A1')}?valueInputOption=USER_ENTERED`,{
+    method:'PUT', headers:{Authorization:'Bearer '+accessToken,'Content-Type':'application/json'},
+    body: JSON.stringify({range:`${tabName}!A1`,majorDimension:'ROWS',values:[mergedHeader]})
+  });
 
-  if(existingRow > 0){
-    // Update existing row
-    const range = `${tabName}!A${existingRow}`;
+  // Update or append student row
+  const existingRowIdx = await findStudentRow(spreadsheetId, tabName, email, cls);
+  if(existingRowIdx > 0){
+    const range = `${tabName}!A${existingRowIdx}`;
     await fetch(`https://sheets.googleapis.com/v4/spreadsheets/${spreadsheetId}/values/${encodeURIComponent(range)}?valueInputOption=USER_ENTERED`,{
-      method:'PUT',
-      headers:{Authorization:'Bearer '+accessToken,'Content-Type':'application/json'},
-      body: JSON.stringify({range,majorDimension:'ROWS',values:[row]})
+      method:'PUT', headers:{Authorization:'Bearer '+accessToken,'Content-Type':'application/json'},
+      body: JSON.stringify({range,majorDimension:'ROWS',values:[mergedRow]})
     });
     return 'updated';
   } else {
-    // Append new row
-    const range = `${tabName}!A1`;
-    await fetch(`https://sheets.googleapis.com/v4/spreadsheets/${spreadsheetId}/values/${encodeURIComponent(range)}:append?valueInputOption=USER_ENTERED&insertDataOption=INSERT_ROWS`,{
-      method:'POST',
-      headers:{Authorization:'Bearer '+accessToken,'Content-Type':'application/json'},
-      body: JSON.stringify({majorDimension:'ROWS',values:[row]})
+    await fetch(`https://sheets.googleapis.com/v4/spreadsheets/${spreadsheetId}/values/${encodeURIComponent(tabName+'!A1')}:append?valueInputOption=USER_ENTERED&insertDataOption=INSERT_ROWS`,{
+      method:'POST', headers:{Authorization:'Bearer '+accessToken,'Content-Type':'application/json'},
+      body: JSON.stringify({majorDimension:'ROWS',values:[mergedRow]})
     });
     return 'appended';
   }
@@ -3791,22 +3843,29 @@ function loadStudentRow(row, tabName){
     if(found){ selectedStudent=found; applyStudentChip(); }
   }
 
-  // Column layout: Name(0) Email(1) Class(2) Grade(3) Date(4) Teacher(5) Template(6) [customFields...] [items...] Avg Comments
-  // Detect whether this row has the Template column by checking rosterHeader
-  const hasTemplateCol = rosterHeader.length > 0 && rosterHeader[6] === 'Template';
-  const templateColOffset = hasTemplateCol ? 1 : 0; // older rows without Template column
-  const storedTemplateName = hasTemplateCol ? (row[6] || '') : '';
+  // Use the header to find exact column positions — reliable regardless of when the row was saved
+  // This handles old rows (no Template col) and new rows (with Template col) automatically
+  const hdr = rosterHeader;
+  const colOf = name => hdr.findIndex(h => h && h.toLowerCase().trim() === name.toLowerCase().trim());
 
-  let customCount = (config.customFields||[]).length;
-  let itemStart   = 6 + templateColOffset + customCount;
-  let all         = getAllItems();
+  // Detect Template column from header
+  const templateColIdx = colOf('Template');
+  const storedTemplateName = templateColIdx >= 0 ? (row[templateColIdx] || '') : '';
+
+  // Find where custom fields and items start/end from the header
+  const customFields = config.customFields || [];
+  // Avg Score and Overall Comments mark the end of items
+  const avgColIdx = colOf('Avg Score');
+  const commentsColIdx = avgColIdx >= 0 ? avgColIdx + 1 : -1;
+
+  let all = getAllItems();
+  let customCount = customFields.length;
 
   const tpls = getTemplates();
   const normalize = s => s.replace(/\s+name\s*$/i,'').toLowerCase().trim();
-
   let switchedTemplate = false;
 
-  // Step 1: Match by stored template name in the row (most reliable — written on every save)
+  // Step 1: Match by stored template name
   if(storedTemplateName){
     const byName = tpls.find(t => t.name.toLowerCase().trim() === storedTemplateName.toLowerCase().trim());
     if(byName && byName.sections.length > 0){
@@ -3814,9 +3873,7 @@ function loadStudentRow(row, tabName){
       const tplItems = byName.sections.flatMap(s=>s.subsections.flatMap(ss=>ss.items)).map(i=>i.label).join('|');
       if(currentItems !== tplItems){
         applyTemplate(byName, true);
-        customCount = (config.customFields||[]).length;
-        itemStart   = 6 + templateColOffset + customCount;
-        all         = getAllItems();
+        all = getAllItems();
         initState();
         switchedTemplate = true;
       }
@@ -3833,9 +3890,7 @@ function loadStudentRow(row, tabName){
       const tplItems = byAssessName.sections.flatMap(s=>s.subsections.flatMap(ss=>ss.items)).map(i=>i.label).join('|');
       if(currentItems !== tplItems){
         applyTemplate(byAssessName, true);
-        customCount = (config.customFields||[]).length;
-        itemStart   = 6 + templateColOffset + customCount;
-        all         = getAllItems();
+        all = getAllItems();
         initState();
         switchedTemplate = true;
       }
@@ -3843,84 +3898,67 @@ function loadStudentRow(row, tabName){
   }
 
   // Step 3: Header-based matching as final fallback
-  if(!switchedTemplate && rosterHeader.length > itemStart){
-    const headerItems = rosterHeader.slice(itemStart);
-    const currentItems = all.map(i=>i.label);
-    const matches = headerItems.length >= all.length &&
-      all.every((item,i) => normalize(headerItems[i]||'') === normalize(item.label));
-    if(!matches){
-      const matchingTpl = tpls.find(tpl=>{
-        const tplItems = tpl.sections.flatMap(s=>s.subsections.flatMap(ss=>ss.items));
-        if(!tplItems.length) return false;
-        const tplCustomCount = (tpl.customFields||[]).length;
-        const tplItemStart = 6 + templateColOffset + tplCustomCount;
-        const tplHeaderItems = rosterHeader.slice(tplItemStart);
-        return tplItems.length <= tplHeaderItems.length &&
-          tplItems.every((item,i) => normalize(tplHeaderItems[i]||'') === normalize(item.label));
-      });
-      if(matchingTpl){
+  if(!switchedTemplate && hdr.length > 6){
+    const matchingTpl = tpls.find(tpl=>{
+      const tplItems = tpl.sections.flatMap(s=>s.subsections.flatMap(ss=>ss.items));
+      if(!tplItems.length) return false;
+      return tplItems.every(item => hdr.some(h => normalize(h||'') === normalize(item.label)));
+    });
+    if(matchingTpl){
+      const currentItems = all.map(i=>i.label).join('|');
+      const tplItems = matchingTpl.sections.flatMap(s=>s.subsections.flatMap(ss=>ss.items)).map(i=>i.label).join('|');
+      if(currentItems !== tplItems){
         applyTemplate(matchingTpl, true);
-        customCount = (config.customFields||[]).length;
-        itemStart   = 6 + templateColOffset + customCount;
-        all         = getAllItems();
+        all = getAllItems();
         initState();
       }
     }
   }
 
-  all.forEach((item, i)=>{
-    const raw = row[itemStart + i] || '';
-    if(!raw || !state[item.id]) return;
-
-    // Scores are stored as "Short (value)" e.g. "M-10 (10)" or "4 (4)"
-    // Extract the numeric value from inside the parentheses
+  // Restore scores by matching header column names to item labels
+  all.forEach(item=>{
+    if(!state[item.id]) return;
+    // Find the column in the header that matches this item's label
+    const itemColIdx = hdr.findIndex(h => normalize(h||'') === normalize(item.label));
+    if(itemColIdx < 0) return;
+    const raw = row[itemColIdx] || '';
+    if(!raw) return;
     const match = raw.match(/\(([^)]+)\)$/);
     if(match){
       const parsed = match[1] === 'N/A' ? null : match[1];
       state[item.id].score = parsed !== null ? String(parsed) : null;
     } else {
-      // Fallback: try treating the raw string as a direct numeric value
       const num = parseFloat(raw);
       state[item.id].score = isNaN(num) ? null : String(num);
     }
   });
 
-  // After restoring scores, check if the stored values match the current scale.
-  // If not (e.g. data was scored with a 10-point scale but form has Standard 4-0),
-  // find the scale whose option values best match the restored scores and apply it.
-  const restoredValues = all
-    .map(i => state[i.id]?.score)
-    .filter(v => v !== null && v !== undefined);
-
+  // Scale matching for restored scores
+  const restoredValues = all.map(i => state[i.id]?.score).filter(v => v !== null && v !== undefined);
   if(restoredValues.length){
     const currentScaleOpts = getItemScale({}).options.map(o => String(o.value));
-    const allMatch = restoredValues.every(v => currentScaleOpts.includes(v));
-    if(!allMatch){
-      // Find the scale in the library whose option values cover the restored scores
+    if(!restoredValues.every(v => currentScaleOpts.includes(v))){
       const matchingScale = config.scales.find(scale =>
-        restoredValues.every(v =>
-          scale.options.some(o => String(o.value) === v || v === 'null')
-        )
+        restoredValues.every(v => scale.options.some(o => String(o.value) === v || v === 'null'))
       );
       if(matchingScale && matchingScale.id !== config.defaultScaleId){
-        // Apply this scale as a section-level override on all sections
         config.sections.forEach(sec => { sec.scaleId = matchingScale.id; });
         saveConfig();
       }
     }
   }
 
-  // Restore custom field values — render bar first so inputs exist in DOM
+  // Restore custom fields by header column name lookup
   renderCustomFieldsBar();
-  (config.customFields||[]).forEach((f, i)=>{
+  customFields.forEach(f=>{
+    const colIdx = colOf(f.label);
     const el = document.getElementById('cf_'+f.id);
-    if(el) el.value = row[6 + templateColOffset + i] || '';
+    if(el) el.value = (colIdx >= 0 ? row[colIdx] : '') || '';
   });
 
-  // Comments are the last column; Avg Score is second-to-last — skip it
-  const commentsIdx = itemStart + all.length + 1; // +1 to skip Avg Score
+  // Restore comments
   const taEl = document.getElementById('overallComments');
-  if(taEl) taEl.value = row[commentsIdx] || '';
+  if(taEl) taEl.value = (commentsColIdx >= 0 ? row[commentsColIdx] : '') || '';
 
   // Set assessment name
   const anEl=document.getElementById('assessmentName'); if(anEl) anEl.value=tabName;
@@ -4464,9 +4502,9 @@ function renderAdminTemplateList(){
     return;
   }
   wrap.innerHTML = tpls.map((tpl,i)=>`
-    <div class="tpl-card">
+    <div class="tpl-card" id="tpl-card-${i}">
       <div class="tpl-icon"><i class="fas fa-layer-group"></i></div>
-      <div style="flex:1;min-width:0;">
+      <div style="flex:1;min-width:0;" id="tpl-view-${i}">
         <div class="tpl-name">${esc(tpl.name)}</div>
         <div class="tpl-meta">
           ${tpl.sections.length} section${tpl.sections.length!==1?'s':''} &nbsp;·&nbsp;
@@ -4475,11 +4513,76 @@ function renderAdminTemplateList(){
           Saved ${new Date(tpl.savedAt).toLocaleDateString()}
         </div>
       </div>
-      <div class="tpl-actions">
+      <div style="flex:1;min-width:0;display:none;" id="tpl-edit-${i}">
+        <div style="display:flex;flex-direction:column;gap:5px;">
+          <input type="text" id="tpl-name-${i}" value="${esc(tpl.name)}"
+            placeholder="Template name..."
+            style="font-size:13px;border:1px solid #ccc;border-radius:6px;padding:4px 9px;outline:none;width:100%;"/>
+          <input type="text" id="tpl-assess-${i}" value="${esc(tpl.assessmentName||'')}"
+            placeholder="Assessment name (e.g. Final Assessment)..."
+            style="font-size:12px;border:1px solid #ccc;border-radius:6px;padding:3px 9px;outline:none;width:100%;color:#666;"/>
+          <div style="font-size:11px;color:#aaa;">Tip: hit "Update from current form" to capture the current sections & fields.</div>
+        </div>
+      </div>
+      <div class="tpl-actions" id="tpl-actions-${i}">
+        <button class="btn btn-sm btn-outline-secondary" onclick="editTemplate(${i})" title="Edit"><i class="fas fa-pen"></i></button>
         <button class="btn btn-sm btn-outline-primary" onclick="applyTemplateFromAdmin(${i})" title="Load this template"><i class="fas fa-upload"></i> Load</button>
         <button class="btn btn-sm btn-outline-danger" onclick="deleteTemplate(${i})" title="Delete"><i class="fas fa-trash"></i></button>
       </div>
+      <div class="tpl-actions" id="tpl-edit-actions-${i}" style="display:none;flex-direction:column;gap:4px;align-items:stretch;min-width:160px;">
+        <button class="btn btn-sm btn-success" onclick="saveTemplateEdit(${i})"><i class="fas fa-check"></i> Save name</button>
+        <button class="btn btn-sm btn-outline-primary" onclick="updateTemplateFromForm(${i})"><i class="fas fa-rotate"></i> Update from current form</button>
+        <button class="btn btn-sm btn-outline-secondary" onclick="cancelTemplateEdit(${i})"><i class="fas fa-xmark"></i> Cancel</button>
+      </div>
     </div>`).join('');
+}
+
+function editTemplate(i){
+  document.getElementById('tpl-view-'+i).style.display='none';
+  document.getElementById('tpl-edit-'+i).style.display='';
+  document.getElementById('tpl-actions-'+i).style.display='none';
+  document.getElementById('tpl-edit-actions-'+i).style.display='flex';
+  document.getElementById('tpl-name-'+i).focus();
+}
+
+function cancelTemplateEdit(i){
+  document.getElementById('tpl-view-'+i).style.display='';
+  document.getElementById('tpl-edit-'+i).style.display='none';
+  document.getElementById('tpl-actions-'+i).style.display='flex';
+  document.getElementById('tpl-edit-actions-'+i).style.display='none';
+}
+
+function saveTemplateEdit(i){
+  const tpls = getTemplates();
+  const tpl = tpls[i];
+  if(!tpl) return;
+  const newName   = document.getElementById('tpl-name-'+i)?.value.trim();
+  const newAssess = document.getElementById('tpl-assess-'+i)?.value.trim();
+  if(!newName){ toast('Template name cannot be empty','fas fa-triangle-exclamation','#f39c12'); return; }
+  tpl.name = newName;
+  tpl.assessmentName = newAssess;
+  saveTemplates(tpls);
+  renderAdminTemplateList();
+  if(accessToken && getSharedSheetId()) syncTemplatesToSheet(true);
+  toast(`Template "${newName}" updated`,'fas fa-check-circle','#27ae60');
+}
+
+function updateTemplateFromForm(i){
+  const tpls = getTemplates();
+  const tpl = tpls[i];
+  if(!tpl) return;
+  const newName   = document.getElementById('tpl-name-'+i)?.value.trim() || tpl.name;
+  const newAssess = document.getElementById('tpl-assess-'+i)?.value.trim() || tpl.assessmentName;
+  // Capture current form state into this template
+  const updated = buildTemplateSnapshot(newName);
+  updated.id = tpl.id; // preserve original ID
+  updated.savedAt = Date.now();
+  updated.assessmentName = newAssess || updated.assessmentName;
+  tpls[i] = updated;
+  saveTemplates(tpls);
+  renderAdminTemplateList();
+  if(accessToken && getSharedSheetId()) syncTemplatesToSheet(true);
+  toast(`"${newName}" updated from current form`,'fas fa-rotate','#27ae60');
 }
 
 function applyTemplateFromAdmin(i){
