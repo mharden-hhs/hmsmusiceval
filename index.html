@@ -3296,17 +3296,14 @@ function getSharedSheetId(){
 function buildSharedRow(){
   const m   = getFormMeta();
   const all = getAllItems();
-  // For each item, store the option label (e.g. "Proficient") alongside numeric value
   const scoreLabels = all.map(i=>{
     const scoreVal = (state[i.id]||{}).score;
     if(scoreVal===null||scoreVal===undefined) return '';
-    // Find the option label for this value in the item's effective scale
     const sec = config.sections.find(s=>s.subsections.some(ss=>ss.items.some(it=>it.id===i.id)));
     const scale = getItemScale(i, sec);
     const opt = scale.options.find(o=>String(o.value)===String(scoreVal));
     return opt ? `${opt.short} (${opt.value!==null?opt.value:'N/A'})` : scoreVal;
   });
-  // Numeric-only values for avg (null = N/A, excluded)
   const numeric = all
     .map(i=>{ const v=(state[i.id]||{}).score; return v!==null&&v!==undefined?parseFloat(v):NaN; })
     .filter(v=>!isNaN(v));
@@ -3314,6 +3311,8 @@ function buildSharedRow(){
   const customVals = (config.customFields||[]).map(f=>{
     const el=document.getElementById('cf_'+f.id); return el?el.value:'';
   });
+  // Store active template name so we can restore the correct template on load
+  const activeTplName = getCurrentTemplateName();
   return [
     m.studentName   || '',
     (selectedStudent||{}).email || m.studentEmail || '',
@@ -3321,6 +3320,7 @@ function buildSharedRow(){
     String((selectedStudent||{}).grade || ''),
     m.assessDate    || '',
     m.teacherName   || '',
+    activeTplName,
     ...customVals,
     ...scoreLabels,
     avg,
@@ -3332,7 +3332,7 @@ function buildSharedHeader(){
   const all = getAllItems();
   const customCols = (config.customFields||[]).map(f=>f.label);
   return [
-    'Student','Email','Class','Grade','Date','Teacher',
+    'Student','Email','Class','Grade','Date','Teacher','Template',
     ...customCols,
     ...all.map(i=>i.label),
     'Avg Score','Overall Comments'
@@ -3791,47 +3791,69 @@ function loadStudentRow(row, tabName){
     if(found){ selectedStudent=found; applyStudentChip(); }
   }
 
-  // Score columns start after the 6 fixed cols + any custom fields
-  // We use rosterHeader to determine the correct template and column layout
+  // Column layout: Name(0) Email(1) Class(2) Grade(3) Date(4) Teacher(5) Template(6) [customFields...] [items...] Avg Comments
+  // Detect whether this row has the Template column by checking rosterHeader
+  const hasTemplateCol = rosterHeader.length > 0 && rosterHeader[6] === 'Template';
+  const templateColOffset = hasTemplateCol ? 1 : 0; // older rows without Template column
+  const storedTemplateName = hasTemplateCol ? (row[6] || '') : '';
+
   let customCount = (config.customFields||[]).length;
-  let itemStart   = 6 + customCount;
+  let itemStart   = 6 + templateColOffset + customCount;
   let all         = getAllItems();
 
-  // Step 1: Try to match template by assessment name (tabName) — simplest and most reliable
   const tpls = getTemplates();
   const normalize = s => s.replace(/\s+name\s*$/i,'').toLowerCase().trim();
 
   let switchedTemplate = false;
-  const nameMatchTpl = tpls.find(tpl =>
-    tpl.assessmentName && tpl.assessmentName.toLowerCase().trim() === tabName.toLowerCase().trim()
-  );
-  if(nameMatchTpl && nameMatchTpl.sections.length > 0){
-    const currentItems = all.map(i=>i.label);
-    const tplItems = nameMatchTpl.sections.flatMap(s=>s.subsections.flatMap(ss=>ss.items)).map(i=>i.label);
-    // Only switch if the template is different from current
-    if(JSON.stringify(currentItems) !== JSON.stringify(tplItems)){
-      applyTemplate(nameMatchTpl, true);
-      customCount = (config.customFields||[]).length;
-      itemStart   = 6 + customCount;
-      all         = getAllItems();
-      initState();
-      switchedTemplate = true;
+
+  // Step 1: Match by stored template name in the row (most reliable — written on every save)
+  if(storedTemplateName){
+    const byName = tpls.find(t => t.name.toLowerCase().trim() === storedTemplateName.toLowerCase().trim());
+    if(byName && byName.sections.length > 0){
+      const currentItems = all.map(i=>i.label).join('|');
+      const tplItems = byName.sections.flatMap(s=>s.subsections.flatMap(ss=>ss.items)).map(i=>i.label).join('|');
+      if(currentItems !== tplItems){
+        applyTemplate(byName, true);
+        customCount = (config.customFields||[]).length;
+        itemStart   = 6 + templateColOffset + customCount;
+        all         = getAllItems();
+        initState();
+        switchedTemplate = true;
+      }
     }
   }
 
-  // Step 2: If name match didn't work, try header-based matching
+  // Step 2: Match by tab name against template assessmentName
+  if(!switchedTemplate){
+    const byAssessName = tpls.find(tpl =>
+      tpl.assessmentName && tpl.assessmentName.toLowerCase().trim() === tabName.toLowerCase().trim()
+    );
+    if(byAssessName && byAssessName.sections.length > 0){
+      const currentItems = all.map(i=>i.label).join('|');
+      const tplItems = byAssessName.sections.flatMap(s=>s.subsections.flatMap(ss=>ss.items)).map(i=>i.label).join('|');
+      if(currentItems !== tplItems){
+        applyTemplate(byAssessName, true);
+        customCount = (config.customFields||[]).length;
+        itemStart   = 6 + templateColOffset + customCount;
+        all         = getAllItems();
+        initState();
+        switchedTemplate = true;
+      }
+    }
+  }
+
+  // Step 3: Header-based matching as final fallback
   if(!switchedTemplate && rosterHeader.length > itemStart){
     const headerItems = rosterHeader.slice(itemStart);
     const currentItems = all.map(i=>i.label);
     const matches = headerItems.length >= all.length &&
       all.every((item,i) => normalize(headerItems[i]||'') === normalize(item.label));
-
     if(!matches){
       const matchingTpl = tpls.find(tpl=>{
         const tplItems = tpl.sections.flatMap(s=>s.subsections.flatMap(ss=>ss.items));
-        if(tplItems.length === 0) return false;
+        if(!tplItems.length) return false;
         const tplCustomCount = (tpl.customFields||[]).length;
-        const tplItemStart = 6 + tplCustomCount;
+        const tplItemStart = 6 + templateColOffset + tplCustomCount;
         const tplHeaderItems = rosterHeader.slice(tplItemStart);
         return tplItems.length <= tplHeaderItems.length &&
           tplItems.every((item,i) => normalize(tplHeaderItems[i]||'') === normalize(item.label));
@@ -3839,7 +3861,7 @@ function loadStudentRow(row, tabName){
       if(matchingTpl){
         applyTemplate(matchingTpl, true);
         customCount = (config.customFields||[]).length;
-        itemStart   = 6 + customCount;
+        itemStart   = 6 + templateColOffset + customCount;
         all         = getAllItems();
         initState();
       }
@@ -3888,12 +3910,11 @@ function loadStudentRow(row, tabName){
     }
   }
 
-  // Restore custom field values — must render the bar first so the inputs exist in DOM
-  // Use the recalculated customCount (after any template switch) for correct column offset
+  // Restore custom field values — render bar first so inputs exist in DOM
   renderCustomFieldsBar();
   (config.customFields||[]).forEach((f, i)=>{
     const el = document.getElementById('cf_'+f.id);
-    if(el) el.value = row[6+i] || '';  // custom fields start at col 6
+    if(el) el.value = row[6 + templateColOffset + i] || '';
   });
 
   // Comments are the last column; Avg Score is second-to-last — skip it
