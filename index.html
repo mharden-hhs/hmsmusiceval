@@ -420,14 +420,14 @@ body{background:var(--light);font-family:'Lato',sans-serif;margin:0;padding:0;}
   <label style="font-size:12px;font-weight:700;color:#555;margin:0;white-space:nowrap;">Assessment Name</label>
   <input type="text" id="assessmentName" placeholder="e.g. Term 1 Final, Semester 2 Mid-term..."
     style="font-size:13px;border:1px solid #ccc;border-radius:6px;padding:4px 10px;outline:none;width:280px;"
-    oninput="autoSave(); onFormAssessmentChange()"
+    oninput="autoSave(); onFormAssessmentChange(); updateSharedSheetBadge();"
     onfocus="showAssessmentNameSuggestions()"
     onblur="setTimeout(hideAssessmentNameSuggestions,200)"
   />
   <div style="position:relative;display:inline-block;">
     <div id="assessmentNameDropdown" style="display:none;position:absolute;top:4px;left:0;background:white;border:1px solid #ddd;border-radius:8px;box-shadow:0 4px 16px rgba(0,0,0,.1);z-index:200;min-width:240px;overflow:hidden;"></div>
   </div>
-  <span style="font-size:11px;color:#aaa;">Each unique name creates a separate tab in the shared sheet.</span>
+  <span id="sheetTabHint" style="font-size:11px;color:#aaa;">Each unique name creates a separate tab in the shared sheet.</span>
   <span id="sharedSheetBadge" style="display:none;font-size:11px;background:#e8f5e9;color:#1b5e20;border:1px solid #a5d6a7;border-radius:10px;padding:2px 9px;margin-left:4px;">
     <i class="fas fa-table" style="font-size:9px;margin-right:3px;"></i>Shared sheet active
   </span>
@@ -657,6 +657,17 @@ body{background:var(--light);font-family:'Lato',sans-serif;margin:0;padding:0;}
     <div style="margin-top:14px;">
       <button class="btn btn-primary" onclick="saveDriveSettings()"><i class="fas fa-check"></i> Save Settings</button>
     </div>
+
+    <hr style="margin:20px 0;"/>
+    <div style="font-size:14px;font-weight:700;color:var(--dk);margin-bottom:4px;"><i class="fas fa-code-branch" style="color:#7b1fa2;margin-right:6px;"></i>Migrate Old Assessment Tabs</div>
+    <div style="font-size:12px;color:#888;margin-bottom:12px;">
+      Reads existing assessment tabs and splits rows by Teacher column into new per-teacher tabs.
+      Original tabs are left intact as backup.
+    </div>
+    <div id="migrateStatus" style="font-size:12px;color:#666;margin-bottom:10px;display:none;background:#f8f9fa;border-radius:6px;padding:8px 12px;"></div>
+    <button class="btn btn-sm" style="background:#7b1fa2;color:white;" onclick="migrateOldTabs()">
+      <i class="fas fa-code-branch"></i> Migrate Old Tabs
+    </button>
   </div>
 
   <!-- TAB: SCALES -->
@@ -1305,13 +1316,13 @@ function renderStudentBar(){
     // Course field — dropdown from config.courses list
     if(f.id === 'courseSelect'){
       const opts = (config.courses||[]).map(c=>`<option value="${esc(c)}">${esc(c)}</option>`).join('');
-      const input = `<select id="courseSelect" onchange="autoSave()" style="width:${f.width||'170px'}"><option value="">Select course...</option>${opts}</select>`;
+      const input = `<select id="courseSelect" onchange="autoSave();updateSharedSheetBadge();" style="width:${f.width||'170px'}"><option value="">Select course...</option>${opts}</select>`;
       return `<label><i class="fas fa-book-open-reader" style="color:#bbb;margin-right:4px;font-size:11px;"></i>${esc(f.label)}</label>${input}`;
     }
     // Teacher field — dropdown from config.teachers list
     if(f.id === 'teacherName'){
       const opts = (config.teachers||[]).map(t=>`<option value="${esc(t)}">${esc(t)}</option>`).join('');
-      const input = `<select id="teacherName" onchange="autoSave()" style="width:${f.width||'140px'}"><option value="">Select teacher...</option>${opts}</select>`;
+      const input = `<select id="teacherName" onchange="autoSave();updateSharedSheetBadge();" style="width:${f.width||'140px'}"><option value="">Select teacher...</option>${opts}</select>`;
       return `<label><i class="fas fa-chalkboard-teacher" style="color:#bbb;margin-right:4px;font-size:11px;"></i>${esc(f.label)}</label>${input}`;
     }
     // Class field — populated from USERS data if available, otherwise config.classes
@@ -1321,7 +1332,7 @@ function renderStudentBar(){
         ? [...new Set(STUDENT_DB.map(s=>s.cls).filter(Boolean))].sort()
         : config.classes;
       const opts = uniqueClasses.map(c=>`<option value="${esc(c)}">${esc(c)}</option>`).join('');
-      const input = `<select id="${f.id}" onchange="autoSave()" style="width:${f.width||'200px'}"><option value="">Select class...</option>${opts}</select>`;
+      const input = `<select id="${f.id}" onchange="autoSave();updateSharedSheetBadge();" style="width:${f.width||'200px'}"><option value="">Select class...</option>${opts}</select>`;
       return `<label><i class="fas fa-users" style="color:#bbb;margin-right:4px;font-size:11px;"></i>${esc(f.label)}</label>${input}`;
     }
     // Remaining field types: date and text
@@ -2087,11 +2098,18 @@ function populateRosterSelectors(){
   clsSel.innerHTML = '<option value="">Select class…</option>' +
     classes.map(c=>`<option value="${esc(c)}" ${c===prevCls?'selected':''}>${esc(c)}</option>`).join('');
 
-  // Assessment dropdown — known tab names from shared sheet
+  // Assessment dropdown — filter to current teacher's tabs
+  // Tab names are "Assessment Name - TeacherName"; show all if no teacher selected
   const assSel = document.getElementById('rosterAssessSelect');
   const prevAss = assSel.value;
+  const currentTeacher = getFormMeta().teacherName || '';
+  const visibleTabs = knownAssessmentNames.filter(n => {
+    if(!currentTeacher) return true; // no teacher selected — show all
+    const suffix = ' - ' + currentTeacher;
+    return n.endsWith(suffix) || !n.includes(' - '); // teacher's tabs + legacy unsuffixed tabs
+  });
   assSel.innerHTML = '<option value="">Select assessment…</option>' +
-    knownAssessmentNames.map(n=>`<option value="${esc(n)}" ${n===prevAss?'selected':''}>${esc(n)}</option>`).join('');
+    visibleTabs.map(n=>`<option value="${esc(n)}" ${n===prevAss?'selected':''}>${esc(n)}</option>`).join('');
 
   // Pre-select from current form if nothing already chosen
   if(!clsSel.value){
@@ -2099,15 +2117,21 @@ function populateRosterSelectors(){
     if(cls) clsSel.value = cls;
   }
   if(!assSel.value){
-    const ass = getAssessmentName();
-    if(ass) assSel.value = ass;
+    // Try matching the full sheet tab name for current teacher
+    const sheetTab = getSheetTabName();
+    const assessName = getAssessmentName();
+    if(sheetTab && assSel.querySelector(`option[value="${CSS.escape(sheetTab)}"]`)){
+      assSel.value = sheetTab;
+    } else if(assessName){
+      // Fallback: match by assessment name portion
+      const match = visibleTabs.find(t => t === assessName || t.startsWith(assessName + ' - '));
+      if(match) assSel.value = match;
+    }
   }
 
   const newCls  = clsSel.value;
   const newAss  = assSel.value;
 
-  // Always reload if both are set — handles the case where names arrived
-  // asynchronously after the sidebar was already open
   if(newCls && newAss){
     const changed = newCls !== rosterClass || newAss !== rosterAssessment;
     rosterClass      = newCls;
@@ -3205,6 +3229,22 @@ async function fetchUserInfo(silent=false){
 function updateSharedSheetBadge(){
   const badge = document.getElementById('sharedSheetBadge');
   if(badge) badge.style.display = getSharedSheetId() ? 'inline-flex' : 'none';
+  // Show the actual tab name that will be written to
+  const hint = document.getElementById('sheetTabHint');
+  if(hint){
+    const tabName = getSheetTabName();
+    const teacher = getFormMeta().teacherName || '';
+    if(tabName && teacher){
+      hint.innerHTML = `→ saves to tab <strong style="color:#1a73e8;">${esc(tabName)}</strong>`;
+      hint.style.color = '#555';
+    } else if(tabName && !teacher){
+      hint.innerHTML = `→ tab will be <strong>${esc(tabName)}</strong> — <span style="color:#e67e22;">select a teacher to namespace by teacher</span>`;
+      hint.style.color = '#555';
+    } else {
+      hint.textContent = 'Each unique name creates a separate tab in the shared sheet.';
+      hint.style.color = '#aaa';
+    }
+  }
 }
 
 function setSignedIn(name,email){
@@ -3285,6 +3325,13 @@ function signOut(){
 
 function getAssessmentName(){
   return (document.getElementById('assessmentName')||{}).value?.trim() || '';
+}
+
+function getSheetTabName(){
+  const assessment = getAssessmentName();
+  if(!assessment) return '';
+  const teacher = getFormMeta().teacherName || '';
+  return teacher ? `${assessment} - ${teacher}` : assessment;
 }
 
 function getSharedSheetId(){
@@ -3558,7 +3605,7 @@ async function saveToSharedSheet(silent=false){
     if(!silent) toast('Not signed in to Google','fas fa-triangle-exclamation','#e74c3c');
     return false;
   }
-  const tabName = getAssessmentName();
+  const tabName = getSheetTabName();
   if(!tabName){
     // No assessment name — show the prompt modal instead of silently failing
     promptAssessmentName();
@@ -3724,10 +3771,26 @@ async function fetchAssessmentNames(){
     });
     const data = await r.json();
     const SYSTEM_TABS = new Set(['USERS','Config','CONFIG','_TEMPLATES','Sheet1','Sheet2','Sheet3']);
-    knownAssessmentNames = (data.sheets||[])
+    const allTabs = (data.sheets||[])
       .map(s=>s.properties.title)
       .filter(t=> !SYSTEM_TABS.has(t) && !t.startsWith('_'));
-    // Update roster assessment dropdown if sidebar is open
+
+    // Store full tab names for roster (teacher-suffixed)
+    knownAssessmentNames = allTabs;
+
+    // For the assessment name input dropdown, strip teacher suffix so teachers
+    // type "Final Assessment 2026" not "Final Assessment 2026 - Harden"
+    // Tab format: "Assessment Name - TeacherName"
+    knownAssessmentNamesDisplay = [...new Set(allTabs.map(t => {
+      // Strip known teacher names from the end
+      const teacherNames = (config.teachers||[]);
+      for(const teacher of teacherNames){
+        const suffix = ' - ' + teacher;
+        if(t.endsWith(suffix)) return t.slice(0, -suffix.length);
+      }
+      return t; // no suffix found, return as-is (legacy tab or no teacher set)
+    }))];
+
     if(rosterOpen) populateRosterSelectors();
   }catch(e){}
 }
@@ -3736,7 +3799,8 @@ function showAssessmentNameSuggestions(){
   const inp = document.getElementById('assessmentName');
   if(!dd||!inp) return;
   const q = inp.value.toLowerCase();
-  const matches = knownAssessmentNames.filter(n=>!q||n.toLowerCase().includes(q));
+  const names = knownAssessmentNamesDisplay.length ? knownAssessmentNamesDisplay : knownAssessmentNames;
+  const matches = names.filter(n=>!q||n.toLowerCase().includes(q));
   if(!matches.length){ dd.style.display='none'; return; }
   dd.innerHTML = matches.map(n=>`
     <div onclick="document.getElementById('assessmentName').value='${n.replace(/'/g,"\\'")}';hideAssessmentNameSuggestions();autoSave();"
